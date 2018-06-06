@@ -1,212 +1,169 @@
+"""TODO: Add module docstring"""
+from collections import OrderedDict
+from functools import reduce
 import numpy as np
-import datetime as dt
 import netCDF4 as nc4
-import ncdiag_functions as ncf
+import gmao_tools as gt
 
-varmap = { 
-    'lat':   'Latitude'         ,
-    'lon':   'Longitude'        ,
-    'kx':    'Observation_Type' ,
-    'used':  'Analysis_Use_Flag',
-    'pres':  'Pressure',
-    'ob':    'Observation',
-    'obs':   'Observation',
-    'omf':   'Obs_Minus_Forecast_adjusted',
-    'omfbc': 'Obs_Minus_Forecast_adjusted',
-    'omfnbc':'Obs_Minus_Forecast_unadjusted',
-    'oma':   'Obs_Minus_Analysis_adjusted',
-    'omabc': 'Obs_Minus_Analysis_adjusted',
-    'omanbc':'Obs_Minus_Analysis_unadjusted',
-    'ichan': 'Channel_Index',
-    'qcmark': 'QC_Flag',
-    'chused': 'use_flag'}
+class Obs():
+    """
+    Add class docstring
+    """
+    def __init__(self, filename, mask_expr=None, verbose=False):
+        self.filename = filename
+        self._verbose = verbose
+        self._mask_expr = mask_expr
+        # Dict mapping short to long names
+        self._short_to_long = {
+            'lat':    'Latitude',
+            'lon':    'Longitude',
+            'kx':     'Observation_Type',
+            'used':   'Analysis_Use_Flag',
+            'pres':   'Pressure',
+            'ob':     'Observation',
+            'obs':    'Observation',
+            'omf':    'Obs_Minus_Forecast_adjusted',
+            'omfbc':  'Obs_Minus_Forecast_adjusted',
+            'omfnbc': 'Obs_Minus_Forecast_unadjusted',
+            'oma':    'Obs_Minus_Analysis_adjusted',
+            'omabc':  'Obs_Minus_Analysis_adjusted',
+            'omanbc': 'Obs_Minus_Analysis_unadjusted',
+            'ichan':  'Channel_Index',
+            'qcmark': 'QC_Flag',
+            'chused': 'use_flag'
+        }
+        # List of derived variables with dependecies and
+        self._derived_vars = {
+            "amb":        {"func": Obs._subtract, "deps": ["omf", "oma"]},
+            "sigo_input": {"func": Obs._whatchamacallit, "deps": ["Errinv_Input"]},
+            "sigo_final": {"func": Obs._whatchamacallit, "deps": ["Errinv_Final"]},
+            "sigo":       {"func": Obs._whatchamacallit, "deps": ["Errinv_Final"]}
+        }
 
-derived_var = {
-    'amb':         {'func': ncf.amb,          'deps': ['omf','oma']},
-    'sigo_input':  {'func': ncf.sigo_input,   'deps': ['Errinv_Input']},
-    'sigo_final':  {'func': ncf.sigo_final,   'deps': ['Errinv_Final']},
-    'sigo':        {'func': ncf.sigo_final,   'deps': ['Errinv_Final']} 
-    }
-
-stats = {
-    'mean':        {'func': np.mean,          'deps': None} ,
-    'cpen':        {'func': ncf.cpen,         'deps': ['sigo']}
-    }
-
-def var_to_var(in_var):
-    if (in_var in varmap):
-        var = varmap[in_var]
-    else:
-        var = in_var
-    return(var)
-
-def getFields(text):
-    import re
-
-    wds = re.compile('\w+\.*\w*').findall(text)
-    return(wds[::2])
-
-
-class obs():
-
-    def __init__(self, fn, date=None, mask=None, verbose=False, reallyverbose=False):
-        self.fn = fn
-        self.nc4 = nc4.Dataset(self.fn)
-        self.data = { 'fn':   self.fn,
-                      'date': date   } 
-        if mask is None:
-            self.mask = None
+    def get_var(self, var_name, mask_expr=None):
+        """
+        Retrieve variable var_name, masked by the expression mask_expr.
+        Here, mask_expr is a string of the form: "(used==1)"
+        """
+        if var_name in self._derived_vars:
+            print(self._derived_vars[var_name])
+            deps = self._derived_vars[var_name]["deps"]
+            function2call = self._derived_vars[var_name]["func"]
+            data = OrderedDict()
+            for myvar in deps: # cannot use comprehension w/ OrderedDict
+                data[myvar] = self._get_single_var(myvar, mask_expr)
+            return function2call(data)
         else:
-            self.set_mask(mask)
+            return self._get_single_var(var_name, mask_expr)
 
-        self.mask_enabled = None
+    @staticmethod
+    def _subtract(data):
+        """
+        data is an OrderedDict of the form
+        {key0: some numpy.ndarray object, key1: another numpy.ndarray object}
+        return data[key0] - data[key1]
+        """
+        if not isinstance(data, OrderedDict):
+            raise ValueError("Input data is of type {}, not OrderedDict".format(type(data)))
+        if len(data) != 2:
+            raise ValueError("Expected exactly 2 entries")
+        data_values = list(data.values())
+        return data_values[0] - data_values[1]
+
+    @staticmethod
+    def _whatchamacallit(data):
+        """data is an OrderedDict containing a single key whose value is a numpy.ndarray"""
+        if not isinstance(data, OrderedDict):
+            raise ValueError("Input data is of type {}, not OrderedDict".format(type(data)))
+        if len(data) != 1:
+            raise ValueError("Expected a single entry in this OrderedDict")
+        vardata = data[next(iter(data))]
+        val = 1./vardata
+        mask = val > 9999.
+        val[mask] = -9999.9
+        return val
+
+    @staticmethod
+    def _check_mask_expr_format(mask_expr):
+        # mask_expr needs to be in the format (somestring==somevalue)
+        if not mask_expr.startswith("(") or \
+           not mask_expr.endswith(")") or \
+           "==" not in mask_expr:
+            raise ValueError(
+                "mask expr \"%s\" is not of the form %s"
+                % (mask_expr, "(some_string==some_value)"
+                  )
+            )
+
+    def _parse_mask_expr(self, mask_expr):
+        Obs._check_mask_expr_format(mask_expr)
+        mask_name, mask_value = mask_expr[
+            mask_expr.find("(")+1:mask_expr.find(")")
+        ].split("==")
+        if self._verbose:
+            print("mask: {} => {}, {}".format(mask_expr, mask_name, mask_value))
+        return (mask_name, mask_value)
+
+    def _get_long_name(self, short_var_name):
+        long_var_name = short_var_name
+        if short_var_name in self._short_to_long:
+            long_var_name = self._short_to_long[short_var_name]
+        return long_var_name
+
+    def _get_single_var(self, var_name, mask_expr):
+        if not mask_expr:
+            mask_expr = self._mask_expr
+        var_name_long = self._get_long_name(var_name)
+        with nc4.Dataset(self.filename, "r") as fin:
+            mydata = fin.variables[var_name_long][:]
+            if mask_expr:
+                (mask_name, mask_value) = self._parse_mask_expr(mask_expr)
+                mask_name_long = self._get_long_name(mask_name)
+                mask = fin.variables[mask_name_long][:] == float(mask_value)
+                mydata = mydata[mask]
+        return mydata
+
+class ObsTemplate():
+
+    def __init__(self, filename_tmpl, datetime_interval=None, verbose=False):
+        self.filename_tmpl = filename_tmpl
         self.verbose = verbose
-        self.reallyverbose = reallyverbose
+        self.datetime_interval = datetime_interval
 
+    def get_var(self, var_name, datetime_interval=None, datetime_list=None, hr_inc=6, mask_expr=None):
+        ndates = self._get_ndates(datetime_interval, datetime_list, hr_inc)
+        dt_list = gt.ndate_to_dt(ndates) # string to datetime objects
+        if self.verbose:
+            print("date/time list: {}".format(dt_list))
+        data = np.array([])
+        for idt in dt_list:
+            filename = self._get_filename_from_tmpl(idt)
+            obs = Obs(filename, mask_expr=mask_expr, verbose=self.verbose)
+            data = np.append(data, obs.get_var(var_name), axis=0)
+        return data
 
-    def use_mask(self, msk):
-        self.mask_enabled = msk
-
-    def set_mask(self, logic):
-        flds = getFields(logic)
-
-        newlogic = logic
-        if (self.reallyverbose): print(newlogic)
-
-        for fld in list(set(flds)):
-            cur = self.v(fld)
-            newlogic = newlogic.replace(fld,'self.data[\'{}\']'.format(var_to_var(fld)))
-
-        if (self.reallyverbose): print(newlogic)
-
-        self.mask=eval(newlogic)
-
-    def v(self, in_var,masked=None):
-        if masked is True and self.mask is None:
-            raise ValueError('Masked is asked for, but no mask is set - use self.set_mask')
-
-        if (masked is None): 
-            msk = self.mask_enabled
+    def _get_ndates(self, datetime_interval, datetime_list, hr_inc):
+        if (datetime_interval) and (not datetime_list):
+            startdate, enddate = datetime_interval
+            ndates = gt.get_ndate_timeseries(startdate, enddate, hr_inc=hr_inc)
+        elif (not datetime_interval) and datetime_list:
+            ndates = datetime_list
+        elif (not datetime_interval) and (not datetime_list) and (self.datetime_interval):
+            startdate, enddate = self.datetime_interval
+            ndates = gt.get_ndate_timeseries(startdate, enddate, hr_inc=hr_inc)
         else:
-            msk = masked
+            raise ValueError("Error in evaluating list of datetimes")
+        return ndates
 
-        derived = in_var in derived_var
-        if (derived):
-            vars = derived_var[in_var]['deps']
-        else:
-            vars = [in_var]
-
-        for cvar in vars:
-            var = var_to_var(cvar)
-            try:
-                self.data[var] = self.nc4.variables[var][...]
-            except:
-                raise ValueError('Field {} not in file'.format(var))
-
-        var = var_to_var(in_var)
-        if (derived):
-            self.data[var] = derived_var[var]['func'](data=self.data)
-
-        if (msk):
-            return(self.data[var][self.mask])
-        else:
-            return(self.data[var])
-
-    def stat(self,stat,var,masked=None):
-        if masked is True and self.mask is None:
-            raise ValueError('Masked is asked for, but no mask is set - use self.set_mask')
-
-        if (masked is None):
-            msk = self.mask_enabled
-        else:
-            msk = masked
- 
-        dep_dict = {}
-
-        if stats[stat]['deps'] is not None:
-            for dep in stats[stat]['deps']:
-                dep_dict[dep] = self.v(dep)
-            value = stats[stat]['func'](self.v(var),dep=dep_dict)
-        else:
-            value = stats[stat]['func'](self.v(var)) 
-
-        return(value)
-
-class obs_template(obs):
-    
-
-    def __init__(self, fn_tmpl, startdate=None, enddate=None, verbose=False, reallyverbose=False):
-        import gmao_tools as gt
-
-        self.fn_tmpl   = fn_tmpl
-        if startdate is not None: self.startdate = startdate
-        if enddate is not None:   self.enddate   = enddate
-        self.verbose = verbose
-        self.reallyverbose = reallyverbose 
-
-        self.mask_logic = None
-        self.mask_enabled = None
-
-        self.obdict = {}
-
-    def set_mask(self, logic):
-        self.mask_logic = logic
-
-# use_mask inhereted from obs
-
-    def fn_from_tmpl(self, dattim):
+    def _get_filename_from_tmpl(self, dattim):
         from string import Template
-
-        fn = Template(self.fn_tmpl)
-        res = fn.safe_substitute(yyyy=dattim.strftime('%Y'), 
-                        mm=dattim.strftime('%m'),
-                        dd=dattim.strftime('%d'),
-                        hh=dattim.strftime('%H'))
-        return(res)
-
-
-    def v(self, in_var, startdate=None, enddate=None, dates=None, hr_inc=6, masked=None):
-        import gmao_tools as gt
-
-        if (masked or self.mask_enabled) and self.mask_logic is None:
-            raise ValueError('Masked data requested, but mask logic is not set')
-        elif ((masked or self.mask_enabled) and self.mask_logic is not None):
-            msk = self.mask_logic
-        else:
-            msk = None
-
-        if startdate is None: startdate=self.startdate
-        if enddate is None:   enddate=self.enddate 
-
-        if (startdate is None and enddate is None and dates is None):
-            raise ValueError('No dates are specified, unable to retrieve data')
-        elif (startdate is not None and enddate is not None and dates is not None):
-            raise ValueError('Start/end dates and dates array specified, unable to retrieve data due to conflicting date specifications')
-        elif ( (startdate is not None and enddate is None) or (startdate is None and enddate is not None) ):
-            raise ValueError('Start/end date specified without the other')
-        elif (startdate is not None and enddate is not None and dates is None):
-            ndates = gt.get_ndate_timeseries(startdate,enddate,hr_inc=hr_inc)
-        elif ( (startdate is None and enddate is None) and dates is not None):
-            ndates = dates
-        else:
-            raise ValueError('Unexcepted failure on date inputs, startdate = {}, enddate = {}, dates = {}'.format(startdate,enddate,dates))
-
-        dts = gt.ndate_to_dt(ndates)
-
-        data = None
-
-        for dt in dts:
-            fn = self.fn_from_tmpl(dt)
-
-            if fn not in self.obdict: 
-                if self.verbose: print('Opening {}'.format(fn))
-                self.obdict[fn] = obs(fn,date=dt,verbose=self.verbose, reallyverbose=self.reallyverbose)
-            if msk is not None:
-                self.obdict[fn].set_mask(msk)
-
-            if (data is None):
-                data = self.obdict[fn].v(in_var,masked=msk)
-            else:
-                data = np.append(data,self.obdict[fn].v(in_var,masked=msk),axis=0)
-                
-        return(data)                  
+        tmplt = Template(self.filename_tmpl)
+        filename = tmplt.safe_substitute( # pchakrab: Shouldn't we use substitute?
+            yyyy=dattim.strftime('%Y'),
+            mm=dattim.strftime('%m'),
+            dd=dattim.strftime('%d'),
+            hh=dattim.strftime('%H')
+        )
+        if self.verbose:
+            print('filename: {}'.format(filename))
+        return filename
