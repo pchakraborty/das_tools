@@ -1,12 +1,5 @@
 #!/usr/bin/env python
-"""Unit tests for ecfseteup.py"""
-
-# import shutil
-# import filecmp
-# import glob
-# from datetime import datetime
-# import ecfsetup
-# import subprocess as sp
+"""Unit tests for ncdiag.py"""
 
 import unittest
 import os
@@ -32,12 +25,18 @@ class TestNcdiag(unittest.TestCase):
             self.this_dir,
             "input",
             "f517_fp.diag_conv_ps_mrg.20180220_12z.nc4")
-        obs = ncd.Obs(filename, verbose=True)
+        obs = ncd.Obs(filename, verbose=True) # no object-wide mask specified
         varlist = ["omf", "oma", "amb"]
         for myvar in varlist:
             print("Plot all O-Fs for all used obs")
             plt.plot(obs.get_var(myvar))
-            plt.title(myvar)
+            plt.title("{} - no masking".format(myvar))
+            plt.show()
+
+            print("Now mask out only \"used\" observations")
+            mask_expr = "(used==1)"
+            plt.plot(obs.get_var(myvar, mask_expr="(used==1)"))
+            plt.title("{} - with masking: {}".format(myvar, mask_expr))
             plt.show()
 
     def test_ncdiag_obs_template(self):
@@ -63,10 +62,9 @@ class TestNcdiag(unittest.TestCase):
         plt.plot(obs_tmpl.get_var("omf", mask_expr=mask_expr))
         plt.title("O-F - with masking {}".format(mask_expr))
         plt.show()
-        
+
     def tearDown(self):
         pass
-
 
 if __name__ == "__main__":
     unittest.main()
