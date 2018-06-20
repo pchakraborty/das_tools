@@ -1,9 +1,11 @@
 """TODO: Add module docstring"""
+import os
 from collections import OrderedDict
 from functools import reduce
 import numpy as np
 import netCDF4 as nc4
 import gmao_tools as gt
+import yaml
 
 class Obs():
     """
@@ -14,25 +16,10 @@ class Obs():
         self._verbose = verbose
         self._mask_expr = mask_expr
         # Dict mapping short to long names
-        self._short_to_long = {
-            'lat':    'Latitude',
-            'lon':    'Longitude',
-            'kx':     'Observation_Type',
-            'used':   'Analysis_Use_Flag',
-            'pres':   'Pressure',
-            'ob':     'Observation',
-            'obs':    'Observation',
-            'omf':    'Obs_Minus_Forecast_adjusted',
-            'omfbc':  'Obs_Minus_Forecast_adjusted',
-            'omfnbc': 'Obs_Minus_Forecast_unadjusted',
-            'oma':    'Obs_Minus_Analysis_adjusted',
-            'omabc':  'Obs_Minus_Analysis_adjusted',
-            'omanbc': 'Obs_Minus_Analysis_unadjusted',
-            'ichan':  'Channel_Index',
-            'qcmark': 'QC_Flag',
-            'chused': 'use_flag'
-        }
-        # List of derived variables with dependecies and
+        this_dir = os.path.dirname(os.path.realpath(__file__))
+        with open(os.path.join(this_dir, "short_to_long_names.yaml"), "r") as fin:
+            self._short_to_long = yaml.safe_load(fin)
+        # List of derived variables with dependecies
         self._derived_vars = {
             "amb":        {"func": Obs._subtract, "deps": ["omf", "oma"]},
             "sigo_input": {"func": Obs._whatchamacallit, "deps": ["Errinv_Input"]},
@@ -46,7 +33,8 @@ class Obs():
         Here, mask_expr is a string of the form: "(used==1)"
         """
         if var_name in self._derived_vars:
-            print(self._derived_vars[var_name])
+            if self._verbose:
+                print(self._derived_vars[var_name])
             deps = self._derived_vars[var_name]["deps"]
             function2call = self._derived_vars[var_name]["func"]
             data = OrderedDict()
@@ -126,19 +114,19 @@ class Obs():
 class ObsTemplate():
 
     def __init__(self, filename_tmpl, datetime_interval=None, verbose=False):
-        self.filename_tmpl = filename_tmpl
-        self.verbose = verbose
-        self.datetime_interval = datetime_interval
+        self._filename_tmpl = filename_tmpl
+        self._verbose = verbose
+        self._datetime_interval = datetime_interval
 
     def get_var(self, var_name, datetime_interval=None, datetime_list=None, hr_inc=6, mask_expr=None):
         ndates = self._get_ndates(datetime_interval, datetime_list, hr_inc)
         dt_list = gt.ndate_to_dt(ndates) # string to datetime objects
-        if self.verbose:
+        if self._verbose:
             print("date/time list: {}".format(dt_list))
         data = np.array([])
         for idt in dt_list:
             filename = self._get_filename_from_tmpl(idt)
-            obs = Obs(filename, mask_expr=mask_expr, verbose=self.verbose)
+            obs = Obs(filename, mask_expr=mask_expr, verbose=self._verbose)
             data = np.append(data, obs.get_var(var_name), axis=0)
         return data
 
@@ -148,8 +136,8 @@ class ObsTemplate():
             ndates = gt.get_ndate_timeseries(startdate, enddate, hr_inc=hr_inc)
         elif (not datetime_interval) and datetime_list:
             ndates = datetime_list
-        elif (not datetime_interval) and (not datetime_list) and (self.datetime_interval):
-            startdate, enddate = self.datetime_interval
+        elif (not datetime_interval) and (not datetime_list) and (self._datetime_interval):
+            startdate, enddate = self._datetime_interval
             ndates = gt.get_ndate_timeseries(startdate, enddate, hr_inc=hr_inc)
         else:
             raise ValueError("Error in evaluating list of datetimes")
@@ -157,13 +145,13 @@ class ObsTemplate():
 
     def _get_filename_from_tmpl(self, dattim):
         from string import Template
-        tmplt = Template(self.filename_tmpl)
+        tmplt = Template(self._filename_tmpl)
         filename = tmplt.safe_substitute( # pchakrab: Shouldn't we use substitute?
             yyyy=dattim.strftime('%Y'),
             mm=dattim.strftime('%m'),
             dd=dattim.strftime('%d'),
             hh=dattim.strftime('%H')
         )
-        if self.verbose:
+        if self._verbose:
             print('filename: {}'.format(filename))
         return filename
